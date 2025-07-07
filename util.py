@@ -28,14 +28,10 @@ def combine_test_with_code(main_code: str, test_code: str) -> str:
 
 
 def print_node_output(s):
-    """Print state from the graph node in less appearing way"""
-    print(Style.DIM, end="")
-    pprint.pprint(s, width=120)
-    print(Style.RESET_ALL, end="")
+    print(s)
 
 
 def multiline_input(prompt: str) -> str:
-    """Let the user input multiple lines, end by EOF (ctrl-d)."""
     print(f"{prompt} [double enter to end]")
 
     lines = []
