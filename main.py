@@ -80,6 +80,14 @@ class TestType(Enum):
     def __str__(self):
         return self.name
 
+
+class LeetCodeProblem(TypedDict):
+    problem_description: str
+    example_description: str
+    solution_interface: str
+    example_test_code: str
+
+
 class Example(TypedDict):
     input: str
     output: str
@@ -407,9 +415,3 @@ if __name__ == '__main__':
     load_dotenv()
     solve_daily_question()
 
-
-class LeetCodeProblem(TypedDict):
-    problem_description: str
-    example_description: str
-    solution_interface: str
-    example_test_code: str
