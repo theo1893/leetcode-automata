@@ -1,9 +1,7 @@
-import pprint
 import re
 from typing import Optional
-from rich import print
 
-from colorama import Fore, Style
+from rich import print
 
 
 def extract_code(content: str, head_sep: str, tail_sep: str) -> Optional[str]:
@@ -25,10 +23,6 @@ def extract_code(content: str, head_sep: str, tail_sep: str) -> Optional[str]:
 def combine_test_with_code(main_code: str, test_code: str) -> str:
     """Merge code followed by test, so test can be executed."""
     return f"# Your solution:\n{main_code}\n\n# QA test:\n{test_code}"
-
-
-def print_node_output(s):
-    print(s)
 
 
 def multiline_input(prompt: str) -> str:

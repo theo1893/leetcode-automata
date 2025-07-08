@@ -1,4 +1,4 @@
-import argparse
+import json
 import json
 import os
 import subprocess
@@ -14,22 +14,20 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel
+from rich import print
 
-from leetcode_api import fetch_daily_question, CodeSnippet, Question, submit_code
+from leetcode_api import fetch_daily_question, Question, submit_code, SubmissionStatus
 from prompt import (
     MAIN_CODE_GEN_SYSTEM_PROMPT,
     MAIN_CODE_GEN_USER_PROMPT,
-    REGEN_BY_COMMENT_USER_PROMPT,
     REGEN_BY_ERROR_USER_PROMPT,
-    PARSE_LEETCODE_PROBLEM_PROMPT, GENERATE_ASSERTION_PROMPT,
+    PARSE_LEETCODE_PROBLEM_PROMPT, GENERATE_ASSERTION_PROMPT, APPEND_ASSERTION_SYSTEM_PROMPT,
+    APPEND_ASSERTION_USER_PROMPT,
 )
 from util import (
-    combine_test_with_code,
-    extract_code,
-    print_node_output, multiline_input
+    combine_test_with_code
 )
 
-AI_TEST_REVISION_LIMIT = 2  ## ai test版本上限
 AI_MAIN_REVISION_LIMIT = 6  ## ai main版本上限
 
 
@@ -40,8 +38,8 @@ class CodeExecutionResult(BaseModel):
     has_error: bool
 
 
+## 在本地执行代码
 def execute_code(code: str) -> CodeExecutionResult:
-    ## 在本地执行代码
     with tempfile.NamedTemporaryFile(suffix=".py", delete=False) as f:
         f.write(code.encode('utf-8'))
         tmp_file_path = f.name
@@ -115,33 +113,16 @@ class AgentState(TypedDict):
 
     ## ai生成的主代码
     main_code: str
-
     ## ai主代码版本
     main_code_revision: int
 
     ## 主代码是否有效, 根据执行结果判断
     is_main_code_good: bool
-    ## ai测试用例是否合理, 由ai自己判断
-    is_ai_test_code_good: bool
-    ## 是否跳过ai测试用例
-    skip_ai_test_code: bool
 
-    ## 上一轮执行结果
+    ## 上一轮本地测试执行结果
     last_test_result: CodeExecutionResult
-    ## 上一轮执行使用的测试用例类型
-    last_test_type: TestType
-
-    has_human_interference: bool
-    ## 人类对主代码的comment
-    human_comment_on_main_code: str
-    ## 人类补充的测试用例
-    human_test_code: Annotated[str, lambda a, b: f"{a}\n{b}"]
-
-
-class AITestResp(TypedDict):
-    test_codes: str  ## 生成的测试代码
-    thoughts: str  ## 思考?
-    conclusion: str  ## 结论?
+    ## 上一轮提交执行结果
+    last_submission_result: SubmissionStatus
 
 
 def get_codegen_workflow() -> StateGraph:
@@ -153,7 +134,7 @@ def get_codegen_workflow() -> StateGraph:
         daily_question = fetch_daily_question()
 
         return {
-            "raw_question": daily_question.data.activeDailyCodingChallengeQuestion.question,
+            "raw_question": daily_question,
         }
 
     def node_parse_leetcode_problem(state: AgentState):
@@ -186,18 +167,29 @@ def get_codegen_workflow() -> StateGraph:
             "parsed_interface_str": parsed_interface_str,
         }
 
+    ## TODO 把提交有误的case加进去
     def node_generate_assertion(state: AgentState):
         print("\n=== 开始生成用例断言 ===\n")
 
-        _system_message = SystemMessage(content=GENERATE_ASSERTION_PROMPT)
-        _local_llm = (lambda messages: [_system_message] + messages) | _llm
+        ## 提交失败后重新生成case的路径
+        if state.get("last_submission_result", None) is not None:
+            _system_message = SystemMessage(content=APPEND_ASSERTION_SYSTEM_PROMPT)
+            _local_llm = (lambda messages: [_system_message] + messages) | _llm
+            _user_message = HumanMessage(content=APPEND_ASSERTION_USER_PROMPT.format(
+                stardard_cases=state["generated_test_cases"],
+                new_case=state["last_submission_result"].input_formatted,
+            ))
+            resp = _local_llm.invoke(input=[_user_message])
+        else:
+            _system_message = SystemMessage(content=GENERATE_ASSERTION_PROMPT)
+            _local_llm = (lambda messages: [_system_message] + messages) | _llm
 
-        content = ""
-        content = content + f"Cases:\n```{state['parsed_examples_str']}```\n\n"
-        content = content + f"Interface:\n```{state['parsed_interface_str']}```"
+            content = ""
+            content = content + f"Cases:\n```{state['parsed_examples_str']}```\n\n"
+            content = content + f"Interface:\n```{state['parsed_interface_str']}```"
 
-        message = HumanMessage(content=content)
-        resp = _local_llm.invoke(input=[message])
+            message = HumanMessage(content=content)
+            resp = _local_llm.invoke(input=[message])
 
         leetcode_problem = LeetCodeProblem(
             problem_description=state['parsed_question_description'],
@@ -217,8 +209,7 @@ def get_codegen_workflow() -> StateGraph:
 
         class MainCodeResp(TypedDict):
             main_codes: str  ## 生成的主代码
-            thoughts: str  ## 思考?
-            conclusion: str  ## 结论?
+            thoughts: str  ## 思考
 
         _system_message = SystemMessage(content=MAIN_CODE_GEN_SYSTEM_PROMPT)
         _local_llm = (lambda messages: [_system_message] + messages) | _llm.with_structured_output(MainCodeResp)
@@ -227,7 +218,7 @@ def get_codegen_workflow() -> StateGraph:
         revision = state.get("main_code_revision", 0)
 
         if (not state.get("main_code")) or (not state.get("last_test_result")):
-            # No reflection since no main code is generated, or no (valid) tests were performed
+            ## 第一次进来, 生成全新的主代码
             message = HumanMessage(
                 content=MAIN_CODE_GEN_USER_PROMPT.format(
                     problem_description=problem["problem_description"],
@@ -236,34 +227,33 @@ def get_codegen_workflow() -> StateGraph:
                 ))
             resp = _local_llm.invoke([message])
         else:
-            # Re-generate main code; reflect the previous error
+            ## 非第一次进来, 需要reflection
             history_messages = state["main_coding_llm_messages"]
             last_test_result = state["last_test_result"]
-            human_comment = state.get("human_comment_on_main_code", "")
+
+            ## TODO 把所有case丢进去
             if last_test_result.has_error:
+                ## 上一轮本地跑的case报错, 重新生成主代码
                 message = HumanMessage(
                     content=REGEN_BY_ERROR_USER_PROMPT.format(
-                        code=last_test_result.code,
+                        code=state.get("main_code", ""),
                         error=last_test_result.stderr,
-                        human_comment=human_comment
                     ))
             else:
+                ## 上一轮提交结果有误, 重新生成主代码
                 message = HumanMessage(
-                    content=REGEN_BY_COMMENT_USER_PROMPT.format(
-                        human_comment=human_comment
-                    ))
+                    content=REGEN_BY_ERROR_USER_PROMPT.format(
+                        code=state.get("main_code", ""),
+                        error=state["last_submission_result"].status_msg,
+                    )
+                )
             resp = _local_llm.invoke(history_messages + [message])
 
         revision += 1
 
-        if not resp:
-            code = None
-        else:
-            code = resp.get("main_codes", "")
-
         return {
             "main_coding_llm_messages": [message, AIMessage(json.dumps(resp))],
-            "main_code": code,
+            "main_code": resp.get("main_codes", ""),
             "main_code_revision": revision
         }
 
@@ -276,54 +266,57 @@ def get_codegen_workflow() -> StateGraph:
 
         example_test_code = state["problem"]["example_test_code"]
 
-        if state["human_test_code"]:
-            example_test_code += "\n" + state["human_test_code"]
-
         code_result = execute_code(
             combine_test_with_code(main_code, example_test_code)
         )
         return {
             "is_main_code_good": not code_result.has_error,
             "last_test_result": code_result,
-            "last_test_type": TestType.EXAMPLES
         }
 
     def node_give_answer(state: AgentState):
-        print("\n=== 结果 ===\n")
+        print("\n=== 测试结果 ===\n")
 
-        print(">>>> SOLUTION <<<<")
+        print(">>>> 主代码 <<<<")
         print(state["main_code"])
-        print(">> SOLUTION END <<\n\n")
+        print(">> 主代码 <<")
 
         if state["is_main_code_good"]:
-            print("This code should work.  Please verify.")
+            print("生成代码通过用例, 准备提交.")
         else:
-            print(f"This code didn't pass the test from {state["last_test_type"]}:\n")
-            print(state["last_test_result"].stderr, end="\n\n")
+            print(f"生成代码未通过用例, 报错: {state["last_test_result"].stderr}")
 
-        if state.get("skip_ai_test_code", False):
-            print("BTW, I tried AI-generated tests but skipped, because the tests themselves have problems.\n")
 
-    def node_finalize(state: AgentState):
+    def node_submit(state: AgentState):
         print("\n=== 提交代码 ===\n")
-        submit_code(state["raw_question"].titleSlug, state["raw_question"].questionId, state["main_code"])
+        submission_status = submit_code(state["raw_question"].titleSlug, state["raw_question"].questionId, state["main_code"])
+
+        return {
+            "last_submission_result": submission_status,
+            "is_main_code_good": True if submission_status.status_msg == "Accepted" else False,
+        }
 
 
     def to_regenerate_main_code(state: AgentState) -> str:
         revision = state.get("main_code_revision") or 0
         if revision >= AI_MAIN_REVISION_LIMIT:
-            return "no"
+            return "no-regen"
 
         if state.get("is_main_code_good", False):
-            return "no"
+            return "no-regen"
         else:
-            return "yes"
+            return "regen"
 
-    def has_human_interference(state: AgentState) -> str:
-        if state.get("has_human_interference"):
-            return "yes"
+    def to_regenerate_testcase(state: AgentState) -> str:
+        revision = state.get("main_code_revision") or 0
+        if revision >= AI_MAIN_REVISION_LIMIT:
+            return "no-regen"
+
+        if state.get("is_main_code_good", False):
+            return "no-regen"
         else:
-            return "no"
+            return "regen"
+
 
     workflow = StateGraph(AgentState)
 
@@ -333,7 +326,7 @@ def get_codegen_workflow() -> StateGraph:
     workflow.add_node("generate_main_code", node_generate_main_code)
     workflow.add_node("test_with_examples", node_test_main_with_examples)
     workflow.add_node("give_answer", node_give_answer)
-    workflow.add_node("finalize", node_finalize)
+    workflow.add_node("submit", node_submit)
 
     workflow.set_entry_point("fetch_daily_question")
 
@@ -341,24 +334,23 @@ def get_codegen_workflow() -> StateGraph:
     workflow.add_edge("node_parse_leetcode_problem", "node_generate_assertion")
     workflow.add_edge("node_generate_assertion", "generate_main_code")
     workflow.add_edge("generate_main_code", "test_with_examples")
+    workflow.add_edge("give_answer", "submit")
     workflow.add_conditional_edges(
         source="test_with_examples",
         path=to_regenerate_main_code,
         path_map={
-            "yes": "generate_main_code",
-            "no": "give_answer"
+            "regen": "generate_main_code",
+            "no-regen": "give_answer",
         }
     )
-
     workflow.add_conditional_edges(
-        source="give_answer",
-        path=has_human_interference,
+        source="submit",
+        path=to_regenerate_testcase,
         path_map={
-            "yes": "generate_main_code",
-            "no": "finalize"
+            "regen": "node_generate_assertion",
+            "no-regen": END
         }
     )
-    workflow.add_edge("finalize", END)
 
     # from IPython.display import Image
     # with open('new_arch.png', 'wb') as f:
@@ -368,47 +360,15 @@ def get_codegen_workflow() -> StateGraph:
 
 
 def solve_daily_question():
-    config = {"configurable": {"thread_id": "user-24601-conv-1337"}}
+    config = {"configurable": {"thread_id": "theo-1893"}}
 
     graph = get_codegen_workflow().compile(
         checkpointer=MemorySaver(),
-        interrupt_after=["give_answer"]
     )
 
     initial_state = {}
     for s in graph.stream(initial_state, config=config):
-        print_node_output(s)  # TODO: verbose
-
-    # XXX: This pattern only works when the upcoming state at the interruption
-    #      is not END, so we can distinguish END from interruption.
-    #      Another pattern is to use `while True:` with conditional break by user_input
-    while graph.get_state(config).next:
-        user_test = multiline_input("Add more asserting tests if necessary")
-        user_comment = input('Provide feedback to revise the code (just enter if none):')
-
-        if user_test or user_comment:
-            state = graph.get_state(config).values
-
-            graph.update_state(
-                config=config,
-                values={
-                    "has_human_interference": True,
-                    "human_comment_on_main_code": user_comment,
-                    "human_test_code": user_test,
-                    "main_code_revision_limit": AI_MAIN_REVISION_LIMIT + 2
-                }
-            )
-        else:
-            graph.update_state(
-                config=config,
-                values={
-                    "human_comment_on_main_code": "",
-                    "has_human_interference": False
-                }
-            )
-
-        for s in graph.stream(None, config=config):
-            print_node_output(s)  # TODO: verbose
+        print(s)
 
 
 if __name__ == '__main__':
