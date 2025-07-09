@@ -45,7 +45,8 @@ class SubmissionStatus(BaseModel):
     status_runtime: Optional[str] = ""  ## 时间消耗
     status_memory: Optional[str] = ""  ## 内存消耗
     status_msg: Optional[str] = ""  ## 状态信息; Accepted - 成功
-    input_formatted: Optional[str] = "" ## 失败的case
+    input_formatted: Optional[str] = "" ## 失败的case input
+    expected_output: Optional[str] = "" ## 失败的case output
 
 LEETCODE_GRAPHQL_URL = "https://leetcode.com/graphql"
 
@@ -121,12 +122,5 @@ def check_submission_status(submission_id) -> SubmissionStatus:
 
 
 if __name__ == '__main__':
+    fetch_daily_question()
     # fetch_selected_question("maximum-number-of-events-that-can-be-attended-ii")
-    submit_code("maximum-number-of-events-that-can-be-attended-ii", "1851", '''from typing import List
-import bisect
-import time
-
-class Solution:
-    def maxValue(self, events: List[List[int]], k: int) -> int:
-        while True:
-            time.sleep(1)''')

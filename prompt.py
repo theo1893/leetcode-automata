@@ -14,30 +14,13 @@ The output protocol:
 # The python code of your solution goes here
 
 <your thoughts if any>
-
-<your conclusion if any>
+# The thoughts for the codes
 """
 
-TEST_CODE_GEN_SYSTEM_PROMPT = """\
-You are an excellent QA that creates testing examples for a python coding problem.
-You will be given a problem description, input / output examples,
-and the interface of the function that a student attempts to solve the problem.
 
-Your job is write a code snippet that executes the student's function with more input examples.
+MAIN_CODE_GEN_USER_PROMPT = """
+Generate python code to solve the following problem
 
-The code snippet must use `assert` to test whether a case is failed or not.
-You only output the testing code without implementing the solution.
-
-The output protocol: 
-<test codes>
-# The python code that tests the student's code goes here
-
-<your thoughts if any>
-
-<your conclusion if any>
-"""
-
-_problem_description = """\
 Problem description:
 ```
 {problem_description}
@@ -52,18 +35,11 @@ The interface for you to implement:
 ```
 {solution_interface}
 ```
-"""
 
-MAIN_CODE_GEN_USER_PROMPT = f"""\
-Generate python code to solve the following problem
-
-{_problem_description}
-"""
-
-TEST_CODE_GEN_USER_PROMPT = f"""\
-Generate python code for testing purpose
-
-{_problem_description}
+The test cases which you should fit to:
+```
+{test_cases}
+```
 """
 
 REGEN_BY_ERROR_USER_PROMPT = """\
@@ -73,70 +49,31 @@ Be careful, the error message may not indicate a problem. It also may result for
 If the error is caused by time or memory limit, you must generate codes with better performance.
 
 The following is the main code you generated:
-
+```
 {code}
+```
 
 
 And the error was:
-
+```
 {error}
+```
 
-Learn from the errors and regenerate the solution using the same output protocol!
+The test cases which you should fit to:
+```
+{test_cases}
+```
 """
 
 REGEN_BY_COMMENT_USER_PROMPT = """\
 Regenerate the solution using the same output protocol
 """
 
-TEST_CODE_VALIDATION_PROMPT = """\
-Given a coding problem:
-```
-{problem_description}
-```
-
-You mission is to validate this testing code from QA.  Check whether this code is reasonable or not:
-```
-{test_code}
-```
-
-You can output your reasoning and thoughts concisely. Below is an example output:
-```json
-{{
-    "reasonable": true // false if the code is not reasonable
-}}
-"""
-
-TEST_CODE_VALIDATION_WITH_ERRORS_PROMPT = """\
-Given a coding problem:
-```
-{problem_description}
-```
-
-Someone wrote a solution, but an error occurred when QA made a test
-```
-{test_code}
-```
-
-And the error was:
-```
-{error_message}
-```
-
-You mission is to validate the testing code block from QA. Check whether the QA code itself is reasonable or not.
-Focus on the wrong test cases if applicable. Be very strict to the test cases.
-If you are not confident about the correctness of the expected answer, consider the case be invalid
-
-You can output your reasoning and thoughts concisely. Below is an example output:
-```json
-{{
-    "reasonable": true // false if the code is not reasonable
-}}
-"""
 
 PARSE_LEETCODE_PROBLEM_PROMPT = """
-You will be given a string in html.
-This html string describes a coding question. There will be a question description, several examples, and maybe constraints.
-Your task is to separate these elements in human friendly format.
+You will be given a string in html which describes a coding question. 
+The string will always contain a question description, several examples, and maybe some constraints. 
+Your task is to separate these elements into a json object.
 
 Example output:
 ```json
@@ -158,10 +95,10 @@ Example output:
 ```
 """
 
-GENERATE_ASSERTION_PROMPT = '''
+GENERATE_ASSERTION_SYSTEM_PROMPT = '''
 You are a coding master. You will be given a coding interface with some human readable test cases.
 Your task is to analyze the input and write some assertions which can be executed directly in python3 depending on the interface and test cases.
-Be careful, since the output will be directly written to a python script, you should never add any redundant words to the beginning or the end. Just make sure the output can be executed instantly.
+Be careful, since the output will be directly written to a python script, you should never add any redundant words to the beginning or the end. Just make sure the output can be executed by a python interpreter instantly.
 
 
 Example:
@@ -189,9 +126,19 @@ assert board == [["5","3","4","6","7","8","9","1","2"],["6","7","2","1","9","5",
 
 '''
 
+GENERATE_ASSERTION_USER_PROMPT = '''
+Cases:
+{parsed_examples_str}
+
+Interface:
+{parsed_interface_str}
+'''
+
 APPEND_ASSERTION_SYSTEM_PROMPT = '''
 You are a coding master. You will be given a standard test case string which can be executed directly, and a new test case not in standard format.
 You should transform the latter test case to standard format and then append it to the former. 
+If no new case is given, just return the original standard case.
+Be careful, since the output will be directly written to a python script, you should never add any redundant words to the beginning or the end. Just make sure the output can be executed by a python interpreter instantly.
 
 
 Example:
@@ -201,9 +148,14 @@ data = [[1,2,4],[3,4,3],[2,3,1]]
 assert Solution().foo(data) == 2
 ```
 
-New case:
+New input:
 ```
-[[2,2,4],[4,4,2],[1,3,3]], 9
+[[2,2,4],[4,4,2],[1,3,3]]
+```
+
+New output:
+```
+9
 ```
 
 Expected output assertions:
@@ -220,6 +172,9 @@ APPEND_ASSERTION_USER_PROMPT = '''
 Cases in standard format:
 {standard_cases}
 
-New case:
-{new_case}
+New input:
+{new_input}
+
+New output:
+{new_output}
 '''
