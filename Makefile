@@ -4,4 +4,4 @@ install:
 
 .PHONY: run
 run:
-	python main.py
+	python main.py --daily
